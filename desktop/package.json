@@ -1,0 +1,9 @@
+{
+  "name": "opus",
+  "productName": "OPUS",
+  "version": "5.1.0",
+  "description": "OPUS - free-lane rhythm game (desktop)",
+  "main": "main.js",
+  "author": "OPUS",
+  "license": "MIT"
+}

@@ -1,0 +1,24 @@
+# dependencies & build output
+node_modules/
+dist/
+out/
+build/
+
+# signing keys — never commit
+*.keystore
+*.jks
+
+# portable app user data (saves, imports, high scores)
+data/
+
+# release binaries belong on GitHub Releases, not in git
+*.apk
+*.exe
+*.zip
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+.vscode/
