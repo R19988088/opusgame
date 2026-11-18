@@ -10,8 +10,8 @@ android {
         applicationId = "com.opusgame.app"
         minSdk = 24
         targetSdk = 35
-        versionCode = 64
-        versionName = "5.7-mod.64"
+        versionCode = 65
+        versionName = "5.7-mod.65"
     }
 
     signingConfigs {
