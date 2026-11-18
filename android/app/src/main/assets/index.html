@@ -1396,6 +1396,7 @@ async function selectSong(idx) {
     await decodeSong(idx);
     C = SONGS[idx].chart;
     curIdx = idx;
+    try { localStorage.opusLastSong = SONGS[idx].id; } catch (e) {}   // 记忆最后选择的歌曲
     applySongMeta(idx);
     buildSongList();
     reset();
@@ -3373,6 +3374,7 @@ async function removeImport(idx) {
   try { if (s.audioKey && AUDIO[s.audioKey]) { URL.revokeObjectURL(AUDIO[s.audioKey]); delete AUDIO[s.audioKey]; } } catch (e) {}
   const wasCurrent = idx === curIdx;
   SONGS.splice(idx, 1);
+  try { if (localStorage.opusLastSong === s.id) delete localStorage.opusLastSong; } catch (e) {}
   try { const m = loadRecords(); delete m[String(s.id)]; saveRecords(m); } catch (e) {}
   if (wasCurrent) {
     stopAudio();
@@ -3399,7 +3401,10 @@ requestAnimationFrame(frame);
     await loadSavedImports();
     buildSongList();
     await initAudio();
-    await selectSong(0);
+    // 开机直接载入上次选择的歌曲；曲目已删除或不存在则回到第一首
+    let startIdx = SONGS.findIndex((s) => s.id === (localStorage.opusLastSong || ""));
+    if (startIdx < 0) startIdx = 0;
+    await selectSong(startIdx);
   } catch (e) {
     console.error(e);
     setLoading("音频初始化失败：" + (e && e.message ? e.message : e));
