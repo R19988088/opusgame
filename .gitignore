@@ -22,3 +22,8 @@ Thumbs.db
 *.log
 .idea/
 .vscode/
+
+# Android local config
+android/local.properties
+android/.gradle/
+

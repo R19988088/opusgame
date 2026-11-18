@@ -1194,6 +1194,10 @@ const KEYS = ["KeyA", "KeyS", "KeyD", "KeyF", "KeyG", "KeyH", "KeyJ", "KeyK", "K
 const KEY_LABEL = ["A", "S", "D", "F", "G", "H", "J", "K", "L", ";"];
 const KEY_HALF = 0.05, TOUCH_HALF = 0.035, HOLD_SLACK = 0.08;
 const WIN = { perfect: 0.05, great: 0.1, good: 0.15 };
+// 判定窗口向上（提前按）扩大 30%：音符还在判定线上方时也能点中；晚按仍然是 WIN.good
+const WIN_EARLY = WIN.good * 1.3;
+// 长键 / 滑键左右各 +20% 判定宽度（半宽 0.5w -> 0.6w）
+const WIDE_HALF = 0.6;
 const WEIGHT = { perfect: 1, great: 0.7, good: 0.4, miss: 0 };
 const JUDGE_COLOR = { perfect: "#ffe3a8", great: "#9fe3ff", good: "#c6b3ff", miss: "#ff6b6b" };
 const SECTION_HUE = { Exposition: 24, dolce: 335, Development: 262, Recapitulation: 24, Coda: 40,
@@ -1238,6 +1242,8 @@ const NOTE_PALETTES = {
   ] },
 };
 const SLIDE_COL = { h: SLIDE_HUE, s: 100, top: 88, mid: 72, bot: 48 };
+// v5.7-mod: 除滑键（黄色、可按住连续识别）外，所有音符统一白色
+const WHITE_COL = { h: 0, s: 0, top: 100, mid: 98, bot: 90 };
 // 资深档：专家原谱用「外黑内金」，追加音用彩色键
 const BLACK_GOLD_COL = { h: 45, s: 100, top: 96, mid: 60, bot: 30, blackGold: true };
 // 导入歌曲可选音符颜色（random = 现在的配色：彩色点按 + 金色滑键）
@@ -1270,7 +1276,41 @@ let C = null, curIdx = -1, loadingSong = false;
 async function initAudio() {
   actx = new (window.AudioContext || window.webkitAudioContext)();
   FX.attachAnalyser(actx);
+  loadHitSfx();
 }
+
+// ------------------------------------------------------------- hit sound (sfx/hit.ogg)
+let hitSfx = null, hitSfxLoad = null, lastHitSfxAt = -1;
+function loadHitSfx() {
+  if (hitSfxLoad) return hitSfxLoad;
+  hitSfxLoad = (async () => {
+    try {
+      const res = await fetch("sfx/hit.ogg");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      hitSfx = await actx.decodeAudioData(await res.arrayBuffer());
+    } catch (e) {
+      hitSfx = null;
+      console.warn("打击音效加载失败", e);
+    }
+  })();
+  return hitSfxLoad;
+}
+function playHitSfx(gain) {
+  if (!hitSfx || !actx || actx.state !== "running") return;
+  const now = actx.currentTime;
+  if (now - lastHitSfxAt < 0.012) return;          // 同一瞬间叠太多就不重复放
+  lastHitSfxAt = now;
+  try {
+    const s = actx.createBufferSource();
+    s.buffer = hitSfx;
+    const gn = actx.createGain();
+    gn.gain.value = gain || 0.6;
+    s.connect(gn);
+    gn.connect(FX.analyserInput || actx.destination);
+    s.start(now);
+  } catch (e) {}
+}
+window.OPUS_SFX_READY = function () { return !!hitSfx; };   // 供排错/自检
 async function decodeSong(idx) {
   const song = SONGS[idx];
   const key = song.audioKey || song.id;
@@ -1415,24 +1455,13 @@ const songTime = () => (state === "pause" ? pausedAt : rawTime()) - opts.offset 
 
 function reset() {
   if (!C) return;
-  const song = SONGS[curIdx] || {};
-  const pal = paletteFor(song.id);
-  const mixed = !!(song.chart && song.chart.enriched);
-  const colorMode = song.colorMode || localStorage.opusAutoColor || "random";
-  const preset = colorMode !== "random" ? COLOR_PRESETS[colorMode] : null;
-  // 资深档是否区分专家原谱（勾选=黑金原谱；不勾=全部用所选颜色）
-  const distBase = mixed && (song.distBase !== undefined ? !!song.distBase
-    : localStorage.opusAutoDistBase !== "0");
+  // 统一配色：普通音符 / 长键白色，金色滑键（按住连续识别）保留原色
   notes = C.notes.map((n) => {
-    let col;
-    if (distBase && n.base) col = BLACK_GOLD_COL;   // 勾选：专家原谱黑金
-    else if (preset) col = preset;                  // 选定的颜色
-    else if (n.type === "slide") col = SLIDE_COL;
-    else if (pal.random) col = pal.list[Math.floor(Math.random() * pal.list.length)];
-    else col = noteColor(pal, n.x);
+    const col = n.type === "slide" ? SLIDE_COL : WHITE_COL;
     return { ...n, judged: null, holding: null, tail: null, col };
   });
   const units = notes.length + notes.filter((n) => n.hold).length;
+  buildChords();
   score = { units, sum: 0, done: 0, combo: 0, max: 0, count: { perfect: 0, great: 0, good: 0, miss: 0 } };
   lastSection = -1; lastBeat = -1;
   pointers.clear(); glows.length = 0;
@@ -1464,8 +1493,44 @@ function pause() {
 function resume() {
   $("pause").classList.add("hide");
   state = "play";
+  if (actx && actx.state === "suspended") actx.resume();
   playFrom(pausedAt - 1.0); // a second of run-up after unpausing
 }
+
+// ------------------------------------------------------------- background sleep
+// 切到后台：立刻静音（挂起 AudioContext）+ 停在暂停页，帧循环也会被 WebView 挂起。
+// 回到前台不自动出声，播放状态等用户点「继续」；创作 / 改谱的音频时钟是冻结的，恢复后从原处继续。
+let bgSleeping = false;
+function bgSleep() {
+  if (bgSleeping) return;
+  bgSleeping = true;
+  stopCreateMetronome();
+  if (state === "play") pause();                    // pause() 内部 stopAudio 并记录当前时间
+  else if (state === "menu" || state === "result") stopAudio();
+  else if (state === "ce" && ceState && !ceState.paused) ceTogglePause();
+  try { if (actx && actx.state === "running") actx.suspend(); } catch (e) {}
+}
+function bgWake() {
+  if (!bgSleeping) return;
+  bgSleeping = false;
+  if (state === "create") {                         // 录谱中：冻结过时钟，恢复上下文即可续上
+    if (actx && actx.state === "suspended") actx.resume();
+    startCreateMetronome();
+  }
+}
+document.addEventListener("visibilitychange", function () {
+  if (document.hidden) bgSleep(); else bgWake();
+});
+window.addEventListener("pagehide", bgSleep);
+window.addEventListener("pageshow", bgWake);
+window.OPUS_SLEEP = bgSleep;
+window.OPUS_WAKE = bgWake;
+window.OPUS_BACK = function () {                     // 安卓返回键
+  if (state === "play") { pause(); return "handled"; }
+  if (state === "pause" || state === "result") { home(); return "handled"; }
+  if (state.indexOf("create") === 0 || state === "ce" || state === "ce-countdown") return "handled";
+  return "exit";
+};
 function home() {
   const pb1 = $("pauseBtn"); if (pb1) pb1.classList.remove("show");
   stopAudio();
@@ -1481,10 +1546,11 @@ function home() {
 }
 
 // ------------------------------------------------------------- judgement
-const covers = (n, x, half) => Math.abs(n.x - x) <= n.w / 2 + half;
+const covers = (n, x, half) => Math.abs(n.x - x) <= n.w * (n.hold || n.type === "slide" ? WIDE_HALF : 0.5) + half;
 
 function record(kind, holdFinish) {
   if (kind !== "miss") {
+    playHitSfx(holdFinish ? 0.75 : kind === "perfect" ? 0.95 : kind === "great" ? 0.85 : 0.7);
     if (holdFinish) hapticDouble();
     else hapticHit(kind === "perfect" ? 16 : kind === "great" ? 12 : 9);
   }
@@ -1511,7 +1577,7 @@ function record(kind, holdFinish) {
   updateHud();
 }
 function hitFx(n, kind) {
-  const p = fieldPoint(n.x), hue = n.col.h;
+  const p = fieldPoint(n.x), hue = 45;              // v5.7-mod: 击中统一金色光效
   const power = kind === "perfect" ? 1.3 : kind === "great" ? 1 : 0.6;
   FX.burst(p.x, p.y, hue, n.type === "slide" ? power * 0.55 : power);
   FX.ring(p.x, p.y, hue, (n.type === "slide" ? 0.5 : 1) * (kind === "perfect" ? 1 : 0.6));
@@ -1530,8 +1596,11 @@ function press(id, x, half) {
   // earliest unjudged tap/hold head under this finger inside the timing window
   let best = null;
   for (const n of notes) {
-    if (n.t - t > WIN.good) break;
-    if (n.judged || n.type === "slide" || Math.abs(n.t - t) > WIN.good || !covers(n, x, half)) continue;
+    if (n.t - t > WIN_EARLY) break;
+    if (n.judged || n.type === "slide") continue;
+    const dt = t - n.t;                       // >0 = 已经越线（按晚），<0 = 还在上方（提前按）
+    if (dt > WIN.good || -dt > WIN_EARLY) continue;
+    if (!covers(n, x, half)) continue;
     if (!best || n.t < best.t - 0.001 || (Math.abs(n.t - best.t) < 0.001 && Math.abs(n.x - x) < Math.abs(best.x - x))) best = n;
   }
   if (!best) return;
@@ -1819,6 +1888,48 @@ function gem(x, y, w, h, col, alpha, slide) {
   g.globalAlpha = 1;
 }
 
+// 同一时刻的音符（和弦）之间补一条横向连线，标出“要同时按”
+let chords = [];
+function buildChords() {
+  chords = [];
+  const EPS = 0.04;                                  // 40 ms 以内算同时
+  const arr = notes.slice().sort((a, b) => a.t - b.t);
+  for (let i = 0; i < arr.length; ) {
+    let j = i + 1;
+    while (j < arr.length && arr[j].t - arr[i].t <= EPS) j++;
+    if (j - i >= 2) chords.push({ t: arr[i].t, list: arr.slice(i, j) });
+    i = j;
+  }
+}
+function drawChords(t, L) {
+  if (!chords.length) return;
+  g.save();
+  g.globalCompositeOperation = "lighter";
+  g.lineCap = "round";
+  for (const c of chords) {
+    const live = c.list.filter((n) => !n.judged);
+    if (live.length < 2) continue;
+    const z = (c.t - t) / L;
+    if (z > 1.05 || z < -0.12) continue;
+    let a = live[0], b = live[0];
+    for (const m of live) { if (m.x < a.x) a = m; if (m.x > b.x) b = m; }
+    if (b.x - a.x < 0.02) continue;
+    const p = proj(0, z);
+    const fade = Math.min(1, (1.05 - z) * 6);
+    const y = p.y;
+    const x0 = cx + fieldX(a.x) * p.s + (a.w || 0.11) * fieldW * p.s * 0.5 + 2 * DPR;
+    const x1 = cx + fieldX(b.x) * p.s - (b.w || 0.11) * fieldW * p.s * 0.5 - 2 * DPR;
+    if (x1 <= x0) continue;
+    g.strokeStyle = `rgba(255,246,228,${0.36 * fade})`;
+    g.lineWidth = Math.max(2 * DPR, 5 * DPR * p.s);
+    g.beginPath(); g.moveTo(x0, y); g.lineTo(x1, y); g.stroke();
+    g.strokeStyle = `rgba(255,250,240,${0.82 * fade})`;
+    g.lineWidth = Math.max(1 * DPR, 1.9 * DPR * p.s);
+    g.beginPath(); g.moveTo(x0, y); g.lineTo(x1, y); g.stroke();
+  }
+  g.restore();
+}
+
 function drawNotes(t) {
   const L = look();
   // pass 1: long-note bodies first (so short notes are never hidden behind a tail)
@@ -1837,20 +1948,20 @@ function drawNotes(t) {
       const w = pw * 0.5, lit = n.holding ? 1 : 0.55;
       const a = proj(px - w / 2, z1), b = proj(px + w / 2, z1), c = proj(px + w / 2, z0), d = proj(px - w / 2, z0);
       if (col.blackGold) {
-        g.fillStyle = `rgba(10,8,5,${0.55 * lit})`;
+        g.fillStyle = `rgba(10,8,5,${0.82 * lit})`;
         quad(a, b, c, d);
         const iw = w * 0.4;
         const ia = proj(px - iw / 2, z1), ib = proj(px + iw / 2, z1), ic = proj(px + iw / 2, z0), id = proj(px - iw / 2, z0);
         const gg = g.createLinearGradient(0, ia.y, 0, id.y);
-        gg.addColorStop(0, `hsla(45,100%,82%,${0.10 * lit})`);
-        gg.addColorStop(0.55, `hsla(44,95%,60%,${0.45 * lit})`);
-        gg.addColorStop(1, `hsla(43,90%,50%,${0.75 * lit})`);
+        gg.addColorStop(0, `hsla(45,100%,82%,${0.34 * lit})`);
+        gg.addColorStop(0.55, `hsla(44,95%,60%,${0.72 * lit})`);
+        gg.addColorStop(1, `hsla(43,90%,50%,${0.94 * lit})`);
         g.fillStyle = gg;
         quad(ia, ib, ic, id);
       } else {
         const lg = g.createLinearGradient(0, a.y, 0, c.y);
-        lg.addColorStop(0, `hsla(${col.h},${Math.min(100, col.s + 5)}%,${col.mid}%,${0.15 * lit})`);
-        lg.addColorStop(1, `hsla(${col.h},${Math.min(100, col.s + 5)}%,${col.mid}%,${0.7 * lit})`);
+        lg.addColorStop(0, `hsla(${col.h},${Math.min(100, col.s + 5)}%,${col.mid}%,${0.5 * lit})`);
+        lg.addColorStop(1, `hsla(${col.h},${Math.min(100, col.s + 5)}%,${col.mid}%,${0.95 * lit})`);
         g.save();
         if (n.holding) g.globalCompositeOperation = "lighter";
         g.fillStyle = lg;
@@ -1868,6 +1979,8 @@ function drawNotes(t) {
       gem(ph.x, ph.y, pw * ph.s, Math.max(hH, 7 * DPR * ph.s), col, fadeH, false);
     }
   }
+  // pass 1.5: chord connectors (drawn under the gems, above hold bodies)
+  drawChords(t, L);
   // pass 2: taps + slides on top
   for (let i = notes.length - 1; i >= 0; i--) {
     const n = notes[i];
@@ -1997,7 +2110,7 @@ document.body.addEventListener("click", (e) => {
     const d = +e.target.dataset.d;
     if (opt === "speed") opts.speed = Math.max(1, Math.min(10, opts.speed + d));
     else if (opt === "haptic") { opts.haptic = !opts.haptic; localStorage.opusHaptic = opts.haptic ? "1" : "0"; }
-    else opts.offset += d * 10;
+    else opts.offset = Math.max(-500, Math.min(500, opts.offset + d));   // 1 ms 步进
     localStorage.opusSpeed = opts.speed; localStorage.opusOffset = opts.offset;
     showOpts();
   }
@@ -2022,14 +2135,7 @@ function fmtTime(sec) {
   return m + ":" + (s < 10 ? "0" : "") + s.toFixed(1);
 }
 function createColorFor(n) {
-  const mode = localStorage.opusAutoColor || "random";
-  const preset = mode !== "random" ? COLOR_PRESETS[mode] : null;
-  if (preset) return preset;
-  const pal = paletteFor("import:create");
-  const list = pal && pal.list ? pal.list : NOTE_PALETTES.imported.list;
-  const k = Math.abs(Math.round(n.t * 1000) * 7 + Math.round(n.x * 1000) * 13);
-  const c = list[k % list.length];
-  return { h: c.h, s: 92, top: 92, mid: 66, bot: 44 };
+  return WHITE_COL;                                  // 录谱时也统一白色
 }
 function createHudCount() {
   const el = $("crCount");
@@ -2603,6 +2709,7 @@ function ceNow() {
 }
 function ceStart(from, rate) {
   if (!ceState || !buffer) return;
+  if (actx && actx.state === "suspended") actx.resume();
   ceStopSource();
   ceState.rate = rate || ceState.rate || 1;
   const off = Math.max(0, Math.min(from || 0, buffer.duration - 0.01));

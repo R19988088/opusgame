@@ -66,12 +66,36 @@ python -m http.server 8080
 
 ```
 web/        游戏源码（页面、内置音频、PWA 与 Service Worker）
+android/    Android WebView 壳工程（Gradle + AGP，可直接出 APK）
 desktop/    Windows Electron 外壳（主进程、预加载、图标）
 docs/       海报与截图
 LICENSE     MIT
 ```
 
 Android / Windows 安装包放在 Releases，不提交进 Git。签名密钥（`.jks` / `.keystore`）也不要放进仓库。
+
+## Android 定制版（本分支）
+
+`android/` 是基于 WebView 的 Android 壳（包名 `com.opusgame.app`，与官方 `com.opus.game` 并存），
+游戏本体仍为 `android/app/src/main/assets/index.html`（与 `web/index.html` 同源），针对手机手感做了以下改动：
+
+- **配色**：除金色滑键（可按住连续识别）外，所有音符与和弦连线统一白色。
+- **打击反馈**：命中统一金色光效（爆散粒子 + 外扩光环 + 键位柱光）；命中播放 `assets/sfx/hit.ogg`（短促打击音，按判定分档音量）。
+- **和弦**：40ms 内的同时音符之间画一条白色横线，两个及以上的组会串成一条。
+- **长键**：长按音符中间的连线不透明度提高到 0.5→0.95，长条更实。
+- **判定范围**：早按窗口放大 30%（150ms → 195ms），晚按保持 150ms；长按 / 滑键的左右容差各 +20%（半宽 0.5w → 0.6w）。
+- **延迟校准**：偏移以 1ms 步进调整，范围 ±500ms。
+- **后台**：切到后台自动静音休眠（暂停音频与渲染计时），回到前台需手动继续。
+- **系统交互**：横屏沉浸全屏、系统返回键回到主菜单、命中触觉反馈、导入歌曲走系统文件选择器。
+
+构建（需要 JDK 17、Android SDK 35）：
+
+```bash
+cd android
+./gradlew assembleRelease
+```
+
+签名密钥不入库：需自行放置 `android/opus-release.jks` 或在 `app/build.gradle.kts` 里改用本机 debug 配置。
 
 ## 许可证
 

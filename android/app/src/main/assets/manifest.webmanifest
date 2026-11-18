@@ -1,0 +1,23 @@
+{
+  "name": "OPUS — 自由轨道音游",
+  "short_name": "OPUS",
+  "description": "自由轨道音乐游戏，内置 4 首曲子，可导入歌曲自动生成谱面。",
+  "start_url": "./",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#05040a",
+  "theme_color": "#0b0910",
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
